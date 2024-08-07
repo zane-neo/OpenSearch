@@ -103,6 +103,7 @@ public abstract class TransportNodesAction<
         Writeable.Reader<NodeRequest> nodeRequest,
         String nodeExecutor,
         String finalExecutor,
+        boolean listenableHandler,
         Class<NodeResponse> nodeResponseClass
     ) {
         super(actionName, transportService, actionFilters, request);
@@ -113,12 +114,49 @@ public abstract class TransportNodesAction<
 
         this.transportNodeAction = actionName + "[n]";
         this.finalExecutor = finalExecutor;
-        transportService.registerRequestHandler(transportNodeAction, nodeExecutor, nodeRequest, new NodeTransportHandler());
+        if (listenableHandler) {
+            transportService.registerRequestHandler(transportNodeAction, nodeExecutor, nodeRequest, new ListenableNodeTransportHandler());
+        } else {
+            transportService.registerRequestHandler(transportNodeAction, nodeExecutor, nodeRequest, new NodeTransportHandler());
+        }
     }
 
     /**
      * Same as {@link #TransportNodesAction(String, ThreadPool, ClusterService, TransportService, ActionFilters, Writeable.Reader,
-     * Writeable.Reader, String, String, Class)} but executes final response collection on the transport thread except for when the final
+     * Writeable.Reader, String, Class)} but register transport handler based on the listenableHandler flag which is default to false.
+     * When setting to true, the transport handler will be an ListenableNodeTransportHandler which can be used in cases that node response
+     * are created in a listener.
+     */
+    protected TransportNodesAction(
+        String actionName,
+        ThreadPool threadPool,
+        ClusterService clusterService,
+        TransportService transportService,
+        ActionFilters actionFilters,
+        Writeable.Reader<NodesRequest> request,
+        Writeable.Reader<NodeRequest> nodeRequest,
+        String nodeExecutor,
+        boolean listenableHandler,
+        Class<NodeResponse> nodeResponseClass
+    ) {
+        this(
+            actionName,
+            threadPool,
+            clusterService,
+            transportService,
+            actionFilters,
+            request,
+            nodeRequest,
+            nodeExecutor,
+            ThreadPool.Names.SAME,
+            listenableHandler,
+            nodeResponseClass
+        );
+    }
+
+    /**
+     * Same as {@link #TransportNodesAction(String, ThreadPool, ClusterService, TransportService, ActionFilters, Writeable.Reader,
+     * Writeable.Reader, String, String, boolean, Class)} but executes final response collection on the transport thread except for when the final
      * node response is received from the local node, in which case {@code nodeExecutor} is used.
      * This constructor should only be used for actions for which the creation of the final response is fast enough to be safely executed
      * on a transport thread.
@@ -144,6 +182,7 @@ public abstract class TransportNodesAction<
             nodeRequest,
             nodeExecutor,
             ThreadPool.Names.SAME,
+            false,
             nodeResponseClass
         );
     }
@@ -195,6 +234,8 @@ public abstract class TransportNodesAction<
     protected abstract NodeResponse newNodeResponse(StreamInput in) throws IOException;
 
     protected abstract NodeResponse nodeOperation(NodeRequest request);
+
+    protected abstract void nodeOperation(NodeRequest request, ActionListener<NodeResponse> actionListener);
 
     protected NodeResponse nodeOperation(NodeRequest request, Task task) {
         return nodeOperation(request);
@@ -329,4 +370,14 @@ public abstract class TransportNodesAction<
         }
     }
 
+    class ListenableNodeTransportHandler implements TransportRequestHandler<NodeRequest> {
+
+        @Override
+        public void messageReceived(NodeRequest request, TransportChannel channel, Task task) {
+            ActionListener<NodeResponse> listener = ActionListener.wrap(channel::sendResponse, e -> {
+                TransportChannel.sendErrorResponse(channel, actionName, request, e);
+            });
+            nodeOperation(request, listener);
+        }
+    }
 }
